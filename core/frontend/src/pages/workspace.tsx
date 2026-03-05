@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import ReactDOM from "react-dom";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import { useSearchParams, useNavigate, useLocation } from "react-router-dom";
 import { Plus, KeyRound, Sparkles, Layers, ChevronLeft, Bot, Loader2, WifiOff, X } from "lucide-react";
 import AgentGraph, { type GraphNode, type NodeStatus } from "@/components/AgentGraph";
 import ChatPanel, { type ChatMessage } from "@/components/ChatPanel";
@@ -300,7 +300,11 @@ export default function Workspace() {
   const [searchParams] = useSearchParams();
   const rawAgent = searchParams.get("agent") || "new-agent";
   const hasExplicitAgent = searchParams.has("agent");
-  const initialPrompt = searchParams.get("prompt") || "";
+  const location = useLocation();
+  const initialPrompt =
+    (location.state as { prompt?: string } | null)?.prompt ||
+    searchParams.get("prompt") ||
+    "";
 
   // When submitting a new prompt from home for "new-agent", use a unique key
   // so each prompt gets its own tab instead of overwriting the previous one.
@@ -397,7 +401,7 @@ export default function Workspace() {
   // Clear URL params after mount — they're consumed during initialization
   // and leaving them causes confusion (stale ?agent= after tab switches, etc.)
   useEffect(() => {
-    navigate("/workspace", { replace: true });
+    navigate("/workspace", { replace: true, state: null });
   }, []);
 
   const [credentialsOpen, setCredentialsOpen] = useState(false);
