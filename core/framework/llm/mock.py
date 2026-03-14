@@ -41,6 +41,10 @@ class MockLLMProvider(LLMProvider):
         """
         self.model = model
 
+    def with_model(self, model: str) -> "MockLLMProvider":
+        """Return a new mock provider reporting *model*."""
+        return MockLLMProvider(model=model)
+
     def _extract_output_keys(self, system: str) -> list[str]:
         """
         Extract expected output keys from the system prompt.

@@ -325,6 +325,7 @@ class LiteLLMProvider(LLMProvider):
         """
         self.model = model
         self.api_key = api_key
+        self._original_api_base = api_base  # Preserve caller's intent for with_model()
         self.api_base = api_base or self._default_api_base_for_model(model)
         self.extra_kwargs = kwargs
         # The Codex ChatGPT backend (chatgpt.com/backend-api/codex) rejects
@@ -351,6 +352,20 @@ class LiteLLMProvider(LLMProvider):
         if model_lower.startswith("minimax/") or model_lower.startswith("minimax-"):
             return MINIMAX_API_BASE
         return None
+
+    def with_model(self, model: str) -> "LiteLLMProvider":
+        """Return a new provider targeting *model*, inheriting auth and config.
+
+        The original ``api_base`` (as passed by the caller, before any
+        model-specific default was applied) is forwarded so that the new
+        instance can compute its own model-specific default if needed.
+        """
+        return LiteLLMProvider(
+            model=model,
+            api_key=self.api_key,
+            api_base=self._original_api_base,
+            **self.extra_kwargs,
+        )
 
     def _completion_with_rate_limit_retry(
         self, max_retries: int | None = None, **kwargs: Any
