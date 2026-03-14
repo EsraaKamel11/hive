@@ -158,6 +158,21 @@ class LLMProvider(ABC):
             model=response.model,
         )
 
+    def with_model(self, model: str) -> "LLMProvider":
+        """Return a new provider instance targeting a different model.
+
+        The default raises ``NotImplementedError`` so that existing
+        subclasses are not forced to implement this.  Subclasses that
+        support per-node model selection (e.g. ``LiteLLMProvider``) or
+        wrapping providers (e.g. a future ``FallbackProvider`` from
+        #3801) MUST override this to preserve their wrapping semantics
+        when the primary model changes.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support with_model(). "
+            "Override with_model() to enable per-node model selection."
+        )
+
 
 # Deferred import target for type annotation
 from framework.llm.stream_events import StreamEvent as StreamEvent  # noqa: E402, F401

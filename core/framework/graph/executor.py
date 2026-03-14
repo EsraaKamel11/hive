@@ -71,6 +71,9 @@ class ExecutionResult:
     # Visit tracking (for feedback/callback edges)
     node_visit_counts: dict[str, int] = field(default_factory=dict)  # {node_id: visit_count}
 
+    # Per-node cost governance (#6214)
+    node_cost_states: dict[str, Any] = field(default_factory=dict)
+
     @property
     def is_clean_success(self) -> bool:
         """True only if execution succeeded with no retries or failures."""
@@ -109,6 +112,18 @@ class ParallelExecutionConfig:
 
     # Timeout per branch in seconds
     branch_timeout_seconds: float = 300.0
+
+
+@dataclass
+class NodeCostState:
+    """Per-node token spend tracking for cost governance (#6214).
+
+    Extensible for #3801 (e.g. ``fallback_count``, ``models_tried``).
+    """
+
+    tokens_used: int = 0
+    model_used: str = ""  # Last model used (tracks degradation)
+    degraded: bool = False  # True if budget triggered degradation
 
 
 class GraphExecutor:
@@ -534,6 +549,7 @@ class GraphExecutor:
         total_latency = 0
         node_retry_counts: dict[str, int] = {}  # Track retries per node
         node_visit_counts: dict[str, int] = {}  # Track visits for feedback loops
+        node_cost_states: dict[str, NodeCostState] = {}  # Per-node token spend (#6214)
         _is_retry = False  # True when looping back for a retry (not a new visit)
 
         # Restore node_visit_counts from session state if available
@@ -791,6 +807,10 @@ class GraphExecutor:
                         error="Execution paused by user request",
                         session_state=pause_session_state,
                         node_visit_counts=dict(node_visit_counts),
+                        node_cost_states={
+                            k: {"tokens_used": v.tokens_used, "model_used": v.model_used, "degraded": v.degraded}
+                            for k, v in node_cost_states.items()
+                        },
                     )
 
                 # Get current node
@@ -891,6 +911,7 @@ class GraphExecutor:
                     identity_prompt=getattr(graph, "identity_prompt", ""),
                     narrative=_resume_narrative,
                     graph=graph,
+                    node_cost_states=node_cost_states,
                 )
 
                 # Log actual input data being read
@@ -1056,6 +1077,14 @@ class GraphExecutor:
                 total_tokens += result.tokens_used
                 total_latency += result.latency_ms
 
+                # Per-node cost tracking (#6214)
+                if current_node_id not in node_cost_states:
+                    node_cost_states[current_node_id] = NodeCostState()
+                _cost = node_cost_states[current_node_id]
+                _cost.tokens_used += result.tokens_used
+                if result.model_used:
+                    _cost.model_used = result.model_used
+
                 # Handle failure
                 if not result.success:
                     # Track retries per node
@@ -1186,6 +1215,10 @@ class GraphExecutor:
                                 execution_quality="failed",
                                 node_visit_counts=dict(node_visit_counts),
                                 session_state=failure_session_state,
+                                node_cost_states={
+                                    k: {"tokens_used": v.tokens_used, "model_used": v.model_used, "degraded": v.degraded}
+                                    for k, v in node_cost_states.items()
+                                },
                             )
 
                 # Check if we just executed a pause node - if so, save state and return
@@ -1246,6 +1279,10 @@ class GraphExecutor:
                         had_partial_failures=len(nodes_failed) > 0,
                         execution_quality=exec_quality,
                         node_visit_counts=dict(node_visit_counts),
+                        node_cost_states={
+                            k: {"tokens_used": v.tokens_used, "model_used": v.model_used, "degraded": v.degraded}
+                            for k, v in node_cost_states.items()
+                        },
                     )
 
                 # Check if this is a terminal node - if so, we're done
@@ -1593,6 +1630,10 @@ class GraphExecutor:
                 had_partial_failures=len(nodes_failed) > 0,
                 execution_quality=exec_quality,
                 node_visit_counts=dict(node_visit_counts),
+                node_cost_states={
+                    k: {"tokens_used": v.tokens_used, "model_used": v.model_used, "degraded": v.degraded}
+                    for k, v in node_cost_states.items()
+                },
                 session_state={
                     "memory": output,  # output IS memory.read_all()
                     "execution_path": list(path),
@@ -1670,6 +1711,10 @@ class GraphExecutor:
                 had_partial_failures=len(nodes_failed) > 0,
                 execution_quality=exec_quality,
                 node_visit_counts=dict(node_visit_counts),
+                node_cost_states={
+                    k: {"tokens_used": v.tokens_used, "model_used": v.model_used, "degraded": v.degraded}
+                    for k, v in node_cost_states.items()
+                },
             )
 
         except Exception as e:
@@ -1769,6 +1814,10 @@ class GraphExecutor:
                 had_partial_failures=len(nodes_failed) > 0,
                 execution_quality="failed",
                 node_visit_counts=dict(node_visit_counts),
+                node_cost_states={
+                    k: {"tokens_used": v.tokens_used, "model_used": v.model_used, "degraded": v.degraded}
+                    for k, v in node_cost_states.items()
+                },
                 session_state=session_state_out,
             )
 
@@ -1794,6 +1843,7 @@ class GraphExecutor:
         narrative: str = "",
         node_registry: dict[str, NodeSpec] | None = None,
         graph: "GraphSpec | None" = None,
+        node_cost_states: dict[str, "NodeCostState"] | None = None,
     ) -> NodeContext:
         """Build execution context for a node."""
         # Filter tools to those available to this node
@@ -1824,13 +1874,53 @@ class GraphExecutor:
 
         goal_context = goal.to_prompt_context()
 
+        # --- Per-node model selection and cost governance (#6214) ---
+        node_llm = self.llm
+        if self.llm is not None:
+            # Degradation takes priority: budget exceeded → fallback model
+            if (
+                node_spec.degradation_policy
+                and node_cost_states
+                and node_spec.id in node_cost_states
+                and node_cost_states[node_spec.id].tokens_used
+                >= node_spec.degradation_policy.token_budget
+            ):
+                for fallback in node_spec.degradation_policy.fallback_models:
+                    try:
+                        node_llm = self.llm.with_model(fallback)
+                        node_cost_states[node_spec.id].degraded = True
+                        node_cost_states[node_spec.id].model_used = fallback
+                        self.logger.info(
+                            "   💰 Node '%s' exceeded token budget (%d/%d), "
+                            "degrading to model: %s",
+                            node_spec.id,
+                            node_cost_states[node_spec.id].tokens_used,
+                            node_spec.degradation_policy.token_budget,
+                            fallback,
+                        )
+                        break
+                    except NotImplementedError:
+                        continue
+
+            # Otherwise: per-node model preference (no budget pressure)
+            elif node_spec.model:
+                try:
+                    node_llm = self.llm.with_model(node_spec.model)
+                except NotImplementedError:
+                    self.logger.warning(
+                        "   ⚠ Node '%s' requests model '%s' but provider "
+                        "doesn't support with_model(); using default",
+                        node_spec.id,
+                        node_spec.model,
+                    )
+
         return NodeContext(
             runtime=self.runtime,
             node_id=node_spec.id,
             node_spec=node_spec,
             memory=scoped_memory,
             input_data=input_data,
-            llm=self.llm,
+            llm=node_llm,  # Per-node model selection (#6214)
             available_tools=available_tools,
             goal_context=goal_context,
             goal=goal,  # Pass Goal object for LLM-powered routers

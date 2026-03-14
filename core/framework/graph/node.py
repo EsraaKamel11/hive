@@ -138,6 +138,27 @@ def find_json_object(text: str) -> str | None:
     return None
 
 
+class DegradationPolicy(BaseModel):
+    """Per-node cost governance policy.
+
+    When a node's cumulative token usage across all visits exceeds
+    ``token_budget``, the executor switches to the first available
+    model in ``fallback_models``.
+
+    Uses ``list[str]`` (not a single string) to align with the
+    fallback-chain concept from #3801.
+    """
+
+    token_budget: int = Field(
+        description="Max cumulative tokens before degradation triggers"
+    )
+    fallback_models: list[str] = Field(
+        description="Ordered list of cheaper models to degrade to"
+    )
+
+    model_config = {"extra": "allow"}
+
+
 class NodeSpec(BaseModel):
     """
     Specification for a node in the graph.
@@ -202,6 +223,10 @@ class NodeSpec(BaseModel):
     tools: list[str] = Field(default_factory=list, description="Tool names this node can use")
     model: str | None = Field(
         default=None, description="Specific model to use (defaults to graph default)"
+    )
+    degradation_policy: DegradationPolicy | None = Field(
+        default=None,
+        description="Optional cost governance: degrade to cheaper model when token budget exceeded",
     )
 
     # For subagent delegation
@@ -594,6 +619,7 @@ class NodeResult:
     # Metadata
     tokens_used: int = 0
     latency_ms: int = 0
+    model_used: str = ""  # Actual model used (tracks per-node selection / degradation)
 
     # Pydantic validation errors (if any)
     validation_errors: list[str] = field(default_factory=list)
