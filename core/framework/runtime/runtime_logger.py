@@ -34,6 +34,7 @@ from framework.runtime.runtime_log_schemas import (
     ToolCallLog,
 )
 from framework.runtime.runtime_log_store import RuntimeLogStore
+from framework.schemas.eval_report import EvalReport
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class RuntimeLogger:
         self._started_at = ""
         self._logged_node_ids: set[str] = set()
         self._lock = threading.Lock()
+        self._eval_reports: dict[str, EvalReport] = {}
 
     def start_run(self, goal_id: str = "", session_id: str = "") -> str:
         """Start a new run. Called by GraphExecutor at graph start. Returns run_id.
@@ -266,6 +268,20 @@ class RuntimeLogger:
             tokens_used=tokens_used,
             latency_ms=latency_ms,
         )
+
+    def store_eval_report(self, report: EvalReport) -> None:
+        """Store an EvalReport produced by NodeEvaluator for a node.
+
+        Keyed by node_id. Thread-safe. Reports are accessible after the run
+        via get_eval_reports(). Logging failure must never raise.
+        """
+        with self._lock:
+            self._eval_reports[report.node_id] = report
+
+    def get_eval_reports(self) -> dict[str, EvalReport]:
+        """Return all eval reports collected during the run (node_id → EvalReport)."""
+        with self._lock:
+            return dict(self._eval_reports)
 
     async def end_run(
         self,

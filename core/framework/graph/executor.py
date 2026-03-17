@@ -18,6 +18,7 @@ from typing import Any
 
 from framework.graph.checkpoint_config import CheckpointConfig
 from framework.graph.edge import EdgeCondition, EdgeSpec, GraphSpec
+from framework.graph.evaluator import NodeEvaluator
 from framework.graph.goal import Goal
 from framework.graph.node import (
     NodeContext,
@@ -152,6 +153,7 @@ class GraphExecutor:
         dynamic_tools_provider: Callable | None = None,
         dynamic_prompt_provider: Callable | None = None,
         iteration_metadata_provider: Callable | None = None,
+        node_evaluator: NodeEvaluator | None = None,
     ):
         """
         Initialize the executor.
@@ -198,6 +200,7 @@ class GraphExecutor:
         self.dynamic_tools_provider = dynamic_tools_provider
         self.dynamic_prompt_provider = dynamic_prompt_provider
         self.iteration_metadata_provider = iteration_metadata_provider
+        self.node_evaluator = node_evaluator
 
         # Parallel execution settings
         self.enable_parallel_execution = enable_parallel_execution
@@ -1043,6 +1046,23 @@ class GraphExecutor:
                             if len(value_str) > 200:
                                 value_str = value_str[:200] + "..."
                             self.logger.info(f"      {key}: {value_str}")
+
+                    # Run NodeEvaluator (non-blocking) — after validation, before memory writes
+                    if self.node_evaluator:
+                        try:
+                            eval_report = await self.node_evaluator.evaluate(
+                                node_spec=node_spec,
+                                node_result=result,
+                                memory=memory.read_all(),
+                            )
+                            if self.runtime_logger:
+                                self.runtime_logger.store_eval_report(eval_report)
+                        except Exception as _eval_exc:
+                            self.logger.warning(
+                                "NodeEvaluator non-blocking failure for %s: %s",
+                                node_spec.id,
+                                _eval_exc,
+                            )
 
                     # Write node outputs to memory BEFORE edge evaluation
                     # This enables direct key access in conditional expressions (e.g., "score > 80")

@@ -16,6 +16,7 @@ from framework.graph.event_loop_node import (
     LoopConfig,
     OutputAccumulator,
 )
+from framework.graph.evaluator import NodeEvaluator
 from framework.graph.executor import GraphExecutor
 from framework.graph.goal import Constraint, Goal, GoalStatus, SuccessCriterion
 from framework.graph.node import NodeContext, NodeProtocol, NodeResult, NodeSpec
@@ -38,6 +39,7 @@ __all__ = [
     "DEFAULT_MAX_TOKENS",
     # Executor
     "GraphExecutor",
+    "NodeEvaluator",
     # Conversation
     "NodeConversation",
     "ConversationStore",
