@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from framework.llm.provider import LLMProvider, Tool
 from framework.runtime.core import Runtime
+from framework.schemas.eval_policy import NodeEvaluationPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,15 @@ class NodeSpec(BaseModel):
             "When True, the implicit judge is bypassed entirely — no feedback is "
             "injected and the loop continues naturally. Intended for conversational "
             "nodes (e.g., the queen) that should never receive tool-use pressure."
+        ),
+    )
+
+    # Per-node evaluation governance
+    evaluation_policy: NodeEvaluationPolicy | None = Field(
+        default=None,
+        description=(
+            "Declarative thresholds and breach actions for this node's EvalReport. "
+            "None = evaluation is run but no thresholds are enforced."
         ),
     )
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from framework.graph.checkpoint_config import CheckpointConfig
 from framework.graph.edge import EdgeCondition, EdgeSpec, GraphSpec
+from framework.graph.evaluator import NodeEvaluator
 from framework.graph.goal import Goal
 from framework.graph.node import (
     NodeContext,
@@ -31,6 +32,8 @@ from framework.llm.provider import LLMProvider, Tool, ToolUse
 from framework.observability import set_trace_context
 from framework.runtime.core import Runtime
 from framework.schemas.checkpoint import Checkpoint
+from framework.schemas.eval_policy import BreachAction, NodeEvaluationPolicy
+from framework.schemas.eval_report import EvalReport
 from framework.storage.checkpoint_store import CheckpointStore
 from framework.utils.io import atomic_write
 
@@ -154,6 +157,7 @@ class GraphExecutor:
         iteration_metadata_provider: Callable | None = None,
         skills_catalog_prompt: str = "",
         protocols_prompt: str = "",
+        node_evaluator: NodeEvaluator | None = None,
     ):
         """
         Initialize the executor.
@@ -181,6 +185,7 @@ class GraphExecutor:
                 system prompt (for phase switching)
             skills_catalog_prompt: Available skills catalog for system prompt
             protocols_prompt: Default skill operational protocols for system prompt
+            node_evaluator: Optional NodeEvaluator called after each successful node
         """
         self.runtime = runtime
         self.llm = llm
@@ -204,6 +209,7 @@ class GraphExecutor:
         self.iteration_metadata_provider = iteration_metadata_provider
         self.skills_catalog_prompt = skills_catalog_prompt
         self.protocols_prompt = protocols_prompt
+        self.node_evaluator = node_evaluator
 
         if protocols_prompt:
             self.logger.info(
@@ -226,6 +232,60 @@ class GraphExecutor:
 
         # Track the currently executing node for external injection routing
         self.current_node_id: str | None = None
+
+    def _check_eval_policy(
+        self,
+        policy: NodeEvaluationPolicy,
+        report: EvalReport,
+        result: NodeResult,
+    ) -> NodeResult:
+        """Apply NodeEvaluationPolicy breach actions and return (possibly mutated) result."""
+        dim_map = {
+            "faithfulness": (policy.min_faithfulness, report.faithfulness),
+            "relevance": (policy.min_relevance, report.relevance),
+            "completeness": (policy.min_completeness, report.completeness),
+            "cost_efficiency": (policy.min_cost_efficiency, report.cost_efficiency),
+        }
+        breached = [
+            name
+            for name, (min_val, score) in dim_map.items()
+            if min_val is not None and score < min_val
+        ]
+        if not breached:
+            return result
+
+        breach_str = ", ".join(f"{d}={getattr(report, d):.2f}" for d in breached)
+
+        if policy.action_on_breach == BreachAction.GUARD_FAILURE:
+            self.logger.error(
+                "NodeEvaluationPolicy GUARD_FAILURE — node %r breached: %s",
+                report.node_id,
+                breach_str,
+            )
+            return NodeResult(
+                success=False,
+                error=f"guard_failure: eval breach [{breach_str}]",
+                output=result.output,
+                tokens_used=result.tokens_used,
+                latency_ms=result.latency_ms,
+            )
+
+        if policy.action_on_breach == BreachAction.DEGRADE_MODEL:
+            # Bridge to DegradationPolicy (#6214) — falls back to WARN until merged.
+            self.logger.warning(
+                "NodeEvaluationPolicy DEGRADE_MODEL — node %r breached: %s. "
+                "DegradationPolicy bridge inactive until #6214 merges; treating as WARN.",
+                report.node_id,
+                breach_str,
+            )
+        else:
+            # BreachAction.WARN (default)
+            self.logger.warning(
+                "NodeEvaluationPolicy WARN — node %r breached: %s",
+                report.node_id,
+                breach_str,
+            )
+        return result
 
     def _write_progress(
         self,
@@ -1062,10 +1122,30 @@ class GraphExecutor:
                                 value_str = value_str[:200] + "..."
                             self.logger.info(f"      {key}: {value_str}")
 
+                    # Evaluation hook — fires after output validation, before memory writes.
+                    # Non-blocking: evaluator failure never affects routing or memory writes.
+                    if self.node_evaluator is not None:
+                        _policy = node_spec.evaluation_policy
+                        if _policy is None or not _policy.skip_evaluation:
+                            try:
+                                _report = await self.node_evaluator.evaluate(
+                                    node_spec, result, memory.read_all()
+                                )
+                                if self.runtime_logger:
+                                    self.runtime_logger.store_eval_report(_report)
+                                if _policy is not None:
+                                    result = self._check_eval_policy(_policy, _report, result)
+                            except Exception as _eval_exc:
+                                self.logger.warning(
+                                    "NodeEvaluator raised for node %r — skipping: %s",
+                                    node_spec.id,
+                                    _eval_exc,
+                                )
+
                     # Write node outputs to memory BEFORE edge evaluation
                     # This enables direct key access in conditional expressions (e.g., "score > 80")
                     # Without this, conditional edges can only use output['key'] syntax
-                    if result.output:
+                    if result.success and result.output:
                         for key, value in result.output.items():
                             memory.write(key, value, validate=False)
                 else:

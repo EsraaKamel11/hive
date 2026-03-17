@@ -16,9 +16,10 @@ Storage layout (current)::
       sessions/
         {session_id}/
           logs/
-            summary.json     # Level 1 — written once at end
-            details.jsonl    # Level 2 — appended per node completion
-            tool_logs.jsonl  # Level 3 — appended per step
+            summary.json       # Level 1 — written once at end
+            details.jsonl      # Level 2 — appended per node completion
+            tool_logs.jsonl    # Level 3 — appended per step
+            eval_reports.jsonl # Level 2.5 — appended per node by NodeEvaluator
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from framework.runtime.runtime_log_schemas import (
     RunSummaryLog,
     RunToolLogs,
 )
+from framework.schemas.eval_report import EvalReport
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,21 @@ class RuntimeLogStore:
         line = json.dumps(detail.model_dump(), ensure_ascii=False) + "\n"
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
+
+    def append_eval_report(self, run_id: str, report: EvalReport) -> None:
+        """Append one JSONL line to eval_reports.jsonl. Sync.
+
+        Level 2.5: one entry per node execution that was evaluated.
+        """
+        path = self._get_run_dir(run_id) / "eval_reports.jsonl"
+        line = json.dumps(report.model_dump(), ensure_ascii=False) + "\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+    async def load_eval_reports(self, run_id: str) -> list[EvalReport]:
+        """Load all EvalReport entries for a run from eval_reports.jsonl."""
+        path = self._get_run_dir(run_id) / "eval_reports.jsonl"
+        return await asyncio.to_thread(_read_jsonl_as_models, path, EvalReport)
 
     def read_node_details_sync(self, run_id: str) -> list[NodeDetail]:
         """Read details.jsonl back into a list of NodeDetail. Sync.

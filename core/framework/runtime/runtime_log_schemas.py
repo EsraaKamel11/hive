@@ -91,6 +91,9 @@ class NodeDetail(BaseModel):
     continue_count: int = 0
     needs_attention: bool = False
     attention_reasons: list[str] = Field(default_factory=list)
+    # Evaluation policy outcome (populated when NodeEvaluationPolicy fires):
+    eval_policy_breached: bool = False
+    breached_dimensions: list[str] = Field(default_factory=list)
     # OTel / trace context (from observability; empty if not set):
     trace_id: str = ""
     span_id: str = ""  # Optional node-level span for hierarchy

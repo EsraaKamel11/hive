@@ -34,6 +34,7 @@ from framework.runtime.runtime_log_schemas import (
     ToolCallLog,
 )
 from framework.runtime.runtime_log_store import RuntimeLogStore
+from framework.schemas.eval_report import EvalReport
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class RuntimeLogger:
         self._goal_id = ""
         self._started_at = ""
         self._logged_node_ids: set[str] = set()
+        self._eval_reports: dict[str, EvalReport] = {}
         self._lock = threading.Lock()
 
     def start_run(self, goal_id: str = "", session_id: str = "") -> str:
@@ -168,6 +170,9 @@ class RuntimeLogger:
         retry_count: int = 0,
         escalate_count: int = 0,
         continue_count: int = 0,
+        # Evaluation policy outcome:
+        eval_policy_breached: bool = False,
+        breached_dimensions: list[str] | None = None,
     ) -> None:
         """Record completion of a node.
 
@@ -226,6 +231,8 @@ class RuntimeLogger:
             continue_count=continue_count,
             needs_attention=needs_attention,
             attention_reasons=attention_reasons,
+            eval_policy_breached=eval_policy_breached,
+            breached_dimensions=breached_dimensions or [],
             trace_id=trace_id,
             span_id=span_id,
         )
@@ -266,6 +273,27 @@ class RuntimeLogger:
             tokens_used=tokens_used,
             latency_ms=latency_ms,
         )
+
+    def store_eval_report(self, report: EvalReport) -> None:
+        """Persist an EvalReport for a node to disk and cache it in memory.
+
+        Called by GraphExecutor immediately after NodeEvaluator.evaluate().
+        Non-blocking: writes one JSONL line; failure is logged but not raised.
+        """
+        with self._lock:
+            self._eval_reports[report.node_id] = report
+            try:
+                self._store.append_eval_report(self._run_id, report)
+            except Exception:
+                logger.exception(
+                    "Failed to append eval_report for node %r (non-fatal)",
+                    report.node_id,
+                )
+
+    def get_eval_reports(self) -> dict[str, EvalReport]:
+        """Return a snapshot of all EvalReports collected so far."""
+        with self._lock:
+            return dict(self._eval_reports)
 
     async def end_run(
         self,
